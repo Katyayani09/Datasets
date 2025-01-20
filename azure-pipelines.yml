@@ -1,0 +1,108 @@
+trigger:
+- main  # Automatically triggers pipeline on changes to the main branch
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+steps:
+# 1. Checkout the GitHub Repository
+- checkout: self
+
+# 2. Use Python Version
+- task: UsePythonVersion@1
+  inputs:
+    versionSpec: '3.x'
+    addToPath: true
+
+# 3. Install Dependencies
+- script: |
+    python -m pip install --upgrade pip
+    pip install -r requirements.txt
+    pip install PyGithub pandas numpy matplotlib seaborn
+  displayName: 'Install Dependencies'
+
+# 4. Load and Process Data
+- script: |
+    import pandas as pd
+    import numpy as np
+    from github import Github
+    import os
+    
+    # Function to load datasets
+    def load_dataset(base_url, dataset_names):
+        data = {}
+        for name in dataset_names:
+            try:
+                url = f"{base_url}/{name}.csv"
+                data[name] = pd.read_csv(url)
+            except Exception as e:
+                print(f"Error loading {name}: {e}")
+        return data
+
+    # Base URLs and dataset names
+    tokyo2021_base_url = "https://raw.githubusercontent.com/Katyayani09/Datasets/main/azure_projects/olympics_data/tokyo2021"
+    paris2024_base_url = "https://raw.githubusercontent.com/Katyayani09/Datasets/main/azure_projects/olympics_data/paris2024/raw_data"
+    datasets_tokyo = ["Athletes", "Coaches", "Medals", "Teams", "EntriesGender"]
+    datasets_paris = ["athletes", "coaches", "medals", "teams"]
+
+    # Load datasets
+    tokyo_data = load_dataset(tokyo2021_base_url, datasets_tokyo)
+    paris_data = load_dataset(paris2024_base_url, datasets_paris)
+
+    # Define processing functions
+    def process_athletes_data(df):
+        df = df[['name', 'gender', 'country_long', 'disciplines']].rename(
+            columns={'name': 'PersonName', 'gender': 'Gender', 'country_long': 'Country', 'disciplines': 'Discipline'}
+        )
+        df['Discipline'] = df['Discipline'].astype(str).str.replace(r'[\[\]\']', '', regex=True)
+        return df.drop_duplicates()
+
+    def process_medals_data(df):
+        total_medals = df.groupby('country_long')['medal_type'].count().reset_index().rename(
+            columns={'medal_type': 'Total', 'country_long': 'TeamCountry'}
+        )
+        total_medals['Rank'] = np.arange(1, len(total_medals) + 1)
+        return total_medals
+
+    # Process datasets
+    a2_cleaned = process_athletes_data(paris_data['athletes'])
+    m2_cleaned = process_medals_data(paris_data['medals'])
+
+    # Save processed datasets
+    a2_cleaned.to_csv('processed_athletes.csv', index=False)
+    m2_cleaned.to_csv('processed_medals.csv', index=False)
+  displayName: 'Load and Process Data'
+
+# 5. Upload Processed Data to GitHub
+- script: |
+    from github import Github
+    import os
+
+    # Load GitHub token
+    github_token = os.getenv("GITHUB_ACCOUNT")
+    if not github_token:
+        raise ValueError("GitHub token not found. Set the token as an environment variable.")
+
+    g = Github(github_token)
+
+    # Access repository
+    repo_name = "Katyayani09/Datasets"
+    try:
+        repo = g.get_repo(repo_name)
+    except Exception as e:
+        raise ValueError(f"Failed to access repository {repo_name}: {e}")
+
+    # Upload files
+    def upload_file(repo, file_path, repo_path, branch="main"):
+        with open(file_path, 'r') as file:
+            content = file.read()
+        try:
+            existing_file = repo.get_contents(repo_path, ref=branch)
+            repo.update_file(repo_path, "Update processed data", content, existing_file.sha, branch=branch)
+        except Exception:
+            repo.create_file(repo_path, "Add processed data", content, branch=branch)
+
+    upload_file(repo, 'processed_athletes.csv', 'azure_projects/processed_data/processed_athletes.csv')
+    upload_file(repo, 'processed_medals.csv', 'azure_projects/processed_data/processed_medals.csv')
+    print("Data uploaded successfully.")
+  displayName: 'Upload Processed Data to GitHub'
